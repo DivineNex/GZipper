@@ -19,7 +19,7 @@
                 case LogMessageType.Warning:
                     Console.ForegroundColor = ConsoleColor.DarkYellow;
                     Console.WriteLine(message);
-                    Console.ForegroundColor = ConsoleColor.Black;
+                    Console.ForegroundColor = ConsoleColor.White;
                     break;
                 case LogMessageType.Error:
                     Console.ForegroundColor = ConsoleColor.Red;
