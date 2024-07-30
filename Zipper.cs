@@ -13,76 +13,109 @@ namespace GZipper
 
         internal static void Compress(string inputFilePath, string outputFilePath)
         {
-
-            StartWriter(outputFilePath);
-
-            using FileStream inputFileStream = File.OpenRead(inputFilePath);
-
-            Parallel.For(0, (inputFileStream.Length + BLOCK_SIZE - 1) / BLOCK_SIZE, i =>
+            try
             {
-                byte[] buffer = new byte[BLOCK_SIZE];
-                int bytesRead;
+                StartWriter(outputFilePath);
 
-                lock (inputFileStream)
+                using FileStream inputFileStream = File.OpenRead(inputFilePath);
+
+                Parallel.For(0, (inputFileStream.Length + BLOCK_SIZE - 1) / BLOCK_SIZE, i =>
                 {
-                    inputFileStream.Seek(i * BLOCK_SIZE, SeekOrigin.Begin);
-                    bytesRead = inputFileStream.Read(buffer, 0, BLOCK_SIZE);
-                }
+                    byte[] buffer = new byte[BLOCK_SIZE];
+                    int bytesRead;
 
-                if (bytesRead > 0)
-                {
-                    byte[] compressedData = CompressBlock(buffer, bytesRead);
-                    _compressedBlocksQueue.Enqueue((i, compressedData));
-                    _dataAvailable.Set();
-                }
-            });
+                    lock (inputFileStream)
+                    {
+                        inputFileStream.Seek(i * BLOCK_SIZE, SeekOrigin.Begin);
+                        bytesRead = inputFileStream.Read(buffer, 0, BLOCK_SIZE);
+                    }
 
-            StopWriter();
+                    if (bytesRead > 0)
+                    {
+                        try
+                        {
+                            byte[] compressedData = CompressBlock(buffer, bytesRead);
+                            _compressedBlocksQueue.Enqueue((i, compressedData));
+                            _dataAvailable.Set();
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Print($"Произошла ошибка при сжатии блока {i}", LogMessageType.Error);
+                        }
+                    }
+                });
+
+                StopWriter();
+            }
+            catch (Exception ex)
+            {
+                Logger.Print($"Произошла ошибка при сжатии файла: {ex.Message}", LogMessageType.Error);
+            }
         }
 
         private static byte[] CompressBlock(byte[] data, int count)
         {
-            using var inputStream = new MemoryStream(data, 0, count);
-            using var outputStream = new MemoryStream();
-            using var gzipStream = new GZipStream(outputStream, CompressionMode.Compress);
-            inputStream.CopyTo(gzipStream);
-            gzipStream.Flush();
-            return outputStream.ToArray();
+            try
+            {
+                using var inputStream = new MemoryStream(data, 0, count);
+                using var outputStream = new MemoryStream();
+                using var gzipStream = new GZipStream(outputStream, CompressionMode.Compress);
+                inputStream.CopyTo(gzipStream);
+                gzipStream.Flush();
+                return outputStream.ToArray();
+            }
+            catch (Exception ex)
+            {
+                Logger.Print($"Произошла ошибка при сжатии блока: {ex.Message}", LogMessageType.Error);
+                return data;
+            }
         }
 
         private static void StartWriter(string outputPath)
         {
             _writerTask = Task.Run(() =>
             {
-                using FileStream outputFileStream = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None);
-                long nextBlockIndex = 0;
-
-                while (true)
+                try
                 {
-                    _dataAvailable.Wait();
-                    _dataAvailable.Reset();
+                    using FileStream outputFileStream = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None);
+                    long nextBlockIndex = 0;
 
-                    while (_compressedBlocksQueue.TryDequeue(out var item))
+                    while (true)
                     {
-                        if (item.index == nextBlockIndex)
-                        {
-                            // Записываем длину блока (4 байта)
-                            byte[] lengthBuffer = BitConverter.GetBytes(item.data.Length);
-                            outputFileStream.Write(lengthBuffer, 0, lengthBuffer.Length);
+                        _dataAvailable.Wait();
+                        _dataAvailable.Reset();
 
-                            outputFileStream.Write(item.data, 0, item.data.Length);
-                            nextBlockIndex++;
-                        }
-                        else
+                        while (_compressedBlocksQueue.TryDequeue(out var item))
                         {
-                            _compressedBlocksQueue.Enqueue(item);
-                        }
-                    }
+                            if (item.index == nextBlockIndex)
+                            {
+                                try
+                                {
+                                    // Записываем длину блока (4 байта)
+                                    byte[] lengthBuffer = BitConverter.GetBytes(item.data.Length);
+                                    outputFileStream.Write(lengthBuffer, 0, lengthBuffer.Length);
 
-                    if (_stopRequested.IsSet)
-                    {
-                        break;
+                                    outputFileStream.Write(item.data, 0, item.data.Length);
+                                    nextBlockIndex++;
+                                }
+                                catch (Exception ex)
+                                {
+                                    Logger.Print($"Произошла ошибка при записи блока {item.index}: {ex.Message}", LogMessageType.Error);
+                                }
+                            }
+                            else
+                            {
+                                _compressedBlocksQueue.Enqueue(item);
+                            }
+                        }
+
+                        if (_stopRequested.IsSet)
+                            break;
                     }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Print($"Произошла ошибка при в файл {outputPath}: {ex.Message}", LogMessageType.Error);
                 }
             });
         }
@@ -96,30 +129,52 @@ namespace GZipper
 
         internal static void Decompress(string inputFilePath, string outputFilePath)
         {
-            using FileStream inputFileStream = File.OpenRead(inputFilePath);
-            using FileStream outputFileStream = File.Create(outputFilePath);
-
-            while (inputFileStream.Position < inputFileStream.Length)
+            try
             {
-                byte[] lengthBuffer = new byte[4];
-                inputFileStream.Read(lengthBuffer, 0, 4);
-                int blockSize = BitConverter.ToInt32(lengthBuffer, 0);
+                using FileStream inputFileStream = File.OpenRead(inputFilePath);
+                using FileStream outputFileStream = File.Create(outputFilePath);
 
-                byte[] buffer = new byte[blockSize];
-                inputFileStream.Read(buffer, 0, blockSize);
+                while (inputFileStream.Position < inputFileStream.Length)
+                {
+                    byte[] lengthBuffer = new byte[4];
+                    inputFileStream.Read(lengthBuffer, 0, 4);
+                    int blockSize = BitConverter.ToInt32(lengthBuffer, 0);
 
-                byte[] decompressedData = DecompressBlock(buffer);
-                outputFileStream.Write(decompressedData, 0, decompressedData.Length);
+                    byte[] buffer = new byte[blockSize];
+                    inputFileStream.Read(buffer, 0, blockSize);
+
+                    try
+                    {
+                        byte[] decompressedData = DecompressBlock(buffer);
+                        outputFileStream.Write(decompressedData, 0, decompressedData.Length);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Print($"Произошла ошибка при декомпрессии блока: {ex.Message}", LogMessageType.Error);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Print($"Произошла ошибка при декомпрессии файла {inputFilePath}: {ex.Message}", LogMessageType.Error);
             }
         }
 
         private static byte[] DecompressBlock(byte[] data)
         {
-            using var inputStream = new MemoryStream(data);
-            using var outputStream = new MemoryStream();
-            using var gzipStream = new GZipStream(inputStream, CompressionMode.Decompress);
-            gzipStream.CopyTo(outputStream);
-            return outputStream.ToArray();
+            try
+            {
+                using var inputStream = new MemoryStream(data);
+                using var outputStream = new MemoryStream();
+                using var gzipStream = new GZipStream(inputStream, CompressionMode.Decompress);
+                gzipStream.CopyTo(outputStream);
+                return outputStream.ToArray();
+            }
+            catch (Exception ex)
+            {
+                Logger.Print($"Произошла ошибка при декомпрессии блока данных: {ex.Message}", LogMessageType.Error);
+                return data;
+            }
         }
     }
 }
