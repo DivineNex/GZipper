@@ -4,6 +4,7 @@
     {
         static void Main(string[] args)
         {
+            //на время тестирования, без учета создания bat-файла и помещения в PATH
             var inputString = Console.ReadLine();
             args = inputString.Split(' ');
 
